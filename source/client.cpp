@@ -15,6 +15,17 @@
 
 // ============================================================================
 
+void ClientKeylogCallback(const SSL* /* ignored */, const char* line) {
+  FILE* fp = fopen("ClientKeylog", "a");
+  ASSERT(fp != NULL, "Failed to open log file\n");
+  
+  fprintf(fp, "%s\n", line);
+  
+  fclose(fp);
+}
+
+// ============================================================================
+
 class Client {
  public:
   Client(const char* server) {
@@ -22,8 +33,27 @@ class Client {
     ASSERT(server_bio != nullptr, "Failed to create server BIO\n");
   }
 
+  void SetupSSL() {
+    ctx = SSL_CTX_new(TLS_method());
+    ASSERT(ctx != nullptr, "Failed to create SSL context\n");
+
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_options(ctx, SSL_OP_ALL);
+    SSL_CTX_set_default_verify_paths(ctx);
+
+    FILE* fp = fopen("ClientKeylog", "w");
+    ASSERT(fp != NULL, "Failed to create log file\n");
+    fclose(fp);
+
+    SSL_CTX_set_keylog_callback(ctx, ClientKeylogCallback);
+
+    ssl = SSL_new(ctx);
+    SSL_set_connect_state(ssl);
+    SSL_set_bio(ssl, server_bio, server_bio);
+  }
+
   void Connect() {
-    ASSERT(BIO_do_connect(server_bio) == 1, "Error connecting to server\n");
+    ASSERT(SSL_connect(ssl) == 1, "Error connecting to server\n");
     printf("Connected to server\n");
   }
 
@@ -33,7 +63,7 @@ class Client {
     while (msg_size > 0) {
       int pkg_size = msg_size > 4096 ? 4096 : msg_size;
 
-      ASSERT(BIO_write(server_bio, msg, pkg_size) == pkg_size, "Failed to send msg\n");
+      ASSERT(SSL_write(ssl, msg, pkg_size) == pkg_size, "Failed to send msg\n");
 
       msg += pkg_size;
       msg_size -= pkg_size;
@@ -50,7 +80,7 @@ class Client {
     while (msg_size > 0) {
       char buffer[4096];
 
-      read_bytes = BIO_read(server_bio, buffer, 4096);
+      read_bytes = SSL_read(ssl, buffer, 4096);
 
       if (read_bytes <= 0) {
         break;
@@ -66,11 +96,14 @@ class Client {
   }
 
   ~Client() {
-    BIO_free(server_bio);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
   }
 
  private:
   BIO* server_bio;
+  SSL_CTX *ctx;
+  SSL *ssl;
 };
 
 // ============================================================================
@@ -84,7 +117,11 @@ int main(int argc, char* argv[]) {
   char buffer[sizeof("255.255.255.255:65000")];
   sprintf(buffer, "%s:%s", argv[1], argv[2]);
 
+  OPENSSL_init_ssl(0, NULL);
+
   Client client(buffer);
+
+  client.SetupSSL();
 
   client.Connect();
 
@@ -93,6 +130,8 @@ int main(int argc, char* argv[]) {
 
   char* original_msg = new char[msg_size];
   char* received_msg = new char[msg_size];
+
+  memset(original_msg, '?', msg_size);
 
   for (; iters > 0; iters--) {
     client.Send(original_msg, msg_size);
